@@ -83,6 +83,14 @@ def get_flat_event_iterator(hits, tracks, vertices, filter=None):
         event.i = i
         yield event
 
+def get_flat_event_iterator_rootfiles(rootfiles):
+    for arrays in uproot.iterate(rootfiles, b'HistoryNTupler/tree'):
+        n_events = arrays[b'simhit_detid'].shape[0] # Can use any branch
+        for i in range(n_events):
+            arrays_thisevt = { key : value[i] for key, value in arrays.items()}
+            yield FlatEvent(arrays_thisevt, arrays_thisevt, arrays_thisevt)
+
+
 class FlatEvent:
     def __init__(self, dhits=None, dtracks=None, dvertices=None):
         if not(dhits is None):
@@ -157,8 +165,4 @@ class FlatEvent:
         return self.subselection(
             (self.hit_z <= 0.), (self.track_z <= 0.), (self.vertex_z <= 0.)
             )
-
-    # def compute_vertex_children(self):
-
-
     
