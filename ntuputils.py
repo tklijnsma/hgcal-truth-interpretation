@@ -199,7 +199,13 @@ def default_arrays_modifier_hgcal(arrays):
     """
     Default inplace modification for arrays
     """
-    fill_hit_track_index(arrays)
+    hit_track_id_branch = b'simhit_fineTrackId'
+    if arrays[b'simhit_fineTrackId'].counts.sum() == 0:
+        # This event was not created saving both regular and fine tracking ID probably
+        logger.warning('Branch simhit_fineTrackId is empty - removing it')
+        del arrays[b'simhit_fineTrackId']
+        hit_track_id_branch = b'simhit_trackId'
+    fill_hit_track_index(arrays, hit_track_id_branch=hit_track_id_branch)
     fill_track_vertex(arrays)
     # filter_tracks_to_origin(arrays, inplace=True)
 
@@ -211,7 +217,7 @@ def get_hit_track_index(
     """
     Translates the track_id of a hit to the index of that track in the event.
     This is a rather complex operation for jagged arrays.
-    Not sure how to do out without at least one for-loop.
+    Not sure how to do it without at least one for-loop.
     """
     # Use dependency for single-ndarray index finding, this is already hard
     import numpy_indexed as npi
@@ -305,10 +311,18 @@ def select(arrays, sel_track=None, sel_vertex=None, sel_hit=None, invert=False, 
         else:
             if invert: selector = np.logical_not(selector)
             # Select according to selector or just select all if None (do copy the vals though)
+            try:
+                selected_vals = arrays[bkey][selector]
+            except (ValueError, TypeError):
+                logger.error(
+                    'Problem for key \'{0}\':\n    arrays[b\'{0}\'] = {1}\n    selector = {2}'
+                    .format(key, arrays[bkey], selector)
+                    )
+                raise
             if inplace:
-                arrays[bkey] = arrays[bkey][selector]
+                arrays[bkey] = selected_vals
             else:
-                arrays_copy[bkey] = arrays[bkey][selector]
+                arrays_copy[bkey] = selected_vals
     return arrays if inplace else arrays_copy
 
 def select_pos(arrays, invert=False):
