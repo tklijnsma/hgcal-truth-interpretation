@@ -1,21 +1,25 @@
 # Some HGCAL things
 
-layers = range(1, 28)
+layers = list(range(1, 51))
 z_pos_layers = [
-    322.10275269, 323.04727173, 325.07275391, 326.01730347, 328.04275513,
-    328.98727417, 331.01272583, 331.95724487, 333.98275757, 334.92724609,
-    336.95275879, 337.89724731, 339.92276001, 340.86727905, 342.89273071,
-    343.83724976, 345.86276245, 346.80725098, 348.83276367, 349.7772522,
-    351.80276489, 352.7472229,  354.77279663, 355.71725464, 357.74276733,
-    358.68725586, 360.71276855, 361.65725708
+    322.103, 323.047, 325.073, 326.017, 328.043, 328.987, 331.013,
+    331.957, 333.983, 334.927, 336.953, 337.897, 339.923, 340.867,
+    342.893, 343.837, 345.863, 346.807, 348.833, 349.777, 351.803,
+    352.747, 354.773, 355.717, 357.743, 358.687, 360.713, 361.657,
+    367.699, 373.149, 378.599, 384.049, 389.499, 394.949, 400.399,
+    405.849, 411.299, 416.749, 422.199, 427.649, 436.199, 444.749,
+    453.299, 461.849, 470.399, 478.949, 487.499, 496.049, 504.599,
+    513.149
     ]
 z_neg_layers = [
-    -322.10275269, -323.04727173, -325.07275391, -326.01730347, -328.04275513,
-    -328.98727417, -331.01272583, -331.95724487, -333.98275757, -334.92724609,
-    -336.95275879, -337.89724731, -339.92276001, -340.86721802, -342.89279175,
-    -343.83724976, -345.86276245, -346.80725098, -348.83276367, -349.7772522,
-    -351.80276489, -352.74728394, -354.7727356,  -355.71725464, -357.74276733,
-    -358.68725586, -360.71276855, -361.65725708,
+    -322.103, -323.047, -325.073, -326.017, -328.043, -328.987, -331.013,
+    -331.957, -333.983, -334.927, -336.953, -337.897, -339.923, -340.867,
+    -342.893, -343.837, -345.863, -346.807, -348.833, -349.777, -351.803,
+    -352.747, -354.773, -355.717, -357.743, -358.687, -360.713, -361.657,
+    -367.699, -373.149, -378.599, -384.049, -389.499, -394.949, -400.399,
+    -405.849, -411.299, -416.749, -422.199, -427.649, -436.199, -444.749,
+    -453.299, -461.849, -470.399, -478.949, -487.499, -496.049, -504.599,
+    -513.149
     ]
 
 hgcal_zmin_pos = min(z_pos_layers)
@@ -54,6 +58,17 @@ import numpy as np
 import seutils
 from math import pi
 
+def is_string(string):
+    """
+    Checks strictly whether `string` is a string
+    Python 2/3 compatibility (https://stackoverflow.com/a/22679982/9209944)
+    """
+    try:
+        basestring
+    except NameError:
+        basestring = str
+    return isinstance(string, basestring)
+
 def get_multiple_indices(subset_values, all_values):
     '''From https://stackoverflow.com/a/32191125/9209944'''
     sorter = np.argsort(all_values)
@@ -83,13 +98,21 @@ def get_flat_event_iterator(hits, tracks, vertices, filter=None):
         event.i = i
         yield event
 
-def get_flat_event_iterator_rootfiles(rootfiles):
+def get_flat_event_iterator_rootfiles(rootfiles, skip=None):
+    """
+    Also accepts just a string
+    """
+    if is_string(rootfiles): rootfiles = [rootfiles]
     for arrays in uproot.iterate(rootfiles, b'HistoryNTupler/tree'):
         n_events = arrays[b'simhit_detid'].shape[0] # Can use any branch
         for i in range(n_events):
+            if i < skip: continue
             arrays_thisevt = { key : value[i] for key, value in arrays.items()}
             yield FlatEvent(arrays_thisevt, arrays_thisevt, arrays_thisevt)
 
+def load_event(rootfiles, i=0):
+    event = next(get_flat_event_iterator_rootfiles(rootfiles, skip=i))
+    return event
 
 class FlatEvent:
     def __init__(self, dhits=None, dtracks=None, dvertices=None):
@@ -101,7 +124,8 @@ class FlatEvent:
         self.hit_y = dhits[b'simhit_y'].flatten()
         self.hit_z = dhits[b'simhit_z'].flatten()
         self.hit_energy = dhits[b'simhit_energy'].flatten()
-        self.hit_trackId = dhits[b'simhit_trackId'].flatten()
+        self.hit_trackId = dhits[b'simhit_fineTrackId'].flatten()
+        self.hit_parentTrackId = dhits[b'simhit_trackId'].flatten()
 
         self.track_x = dtracks[b'simtrack_x'].flatten()
         self.track_y = dtracks[b'simtrack_y'].flatten()
@@ -165,4 +189,17 @@ class FlatEvent:
         return self.subselection(
             (self.hit_z <= 0.), (self.track_z <= 0.), (self.vertex_z <= 0.)
             )
+
+    def select_muon(self):
+        return self.subselection(
+            np.abs(self.hit_pdgid) == 13,
+            np.abs(self.track_pdgid) == 13,
+            [],
+            )
     
+    def select_not_muon(self):
+        return self.subselection(
+            np.abs(self.hit_pdgid) != 13,
+            np.abs(self.track_pdgid) != 13,
+            [],
+            )

@@ -1,15 +1,16 @@
 from __future__ import print_function
 import uproot
-import numpy as np, logging, os.path as osp, os
+import numpy as np, logging, os.path as osp, os, gc
 import seutils
 from math import pi
+import matplotlib._color_data as mcd
 import matplotlib.pyplot as plt
 from contextlib import contextmanager
 
 # ___________________________________________________
 # General utils
 
-DEFAULT_LOGGING_LEVEL = logging.DEBUG
+DEFAULT_LOGGING_LEVEL = logging.INFO
 def setup_logger(name='hgcalplot'):
     if name in logging.Logger.manager.loggerDict:
         logger = logging.getLogger(name)
@@ -38,7 +39,7 @@ if is_interactive():
     from tqdm.notebook import tqdm
     logger.info('Using tqdm notebook')
 else:
-    import tqdm.tqdm as tqdm
+    from tqdm import tqdm
 
 @contextmanager
 def temporarily_set_loglevel(loglevel=logging.WARNING):
@@ -125,18 +126,18 @@ class Dataset(object):
             if not len(self.cache):
                 raise Exception('use_cache was True but no cache was set')
             logger.info('Using cache')
+            inplace_modifier = kwargs.pop('inplace_modifier', None)
             iterator = iter(self.cache)
             total = len(self.cache)
-            inplace_modifier = kwargs.get('inplace_modifier', None)
         else:
             # Allow reading only the first n_files root files
             rootfiles = self.rootfiles[:]
             if n_files: rootfiles = rootfiles[:n_files]
-            iterator = uproot.iterate(rootfiles, self.treename, **kwargs)
-            total = len(rootfiles)
             # Function for some modifications to the arrays object that should always be made
             # (Like filling extra branches etc.)
-            inplace_modifier = kwargs.get('inplace_modifier', default_arrays_modifier_hgcal)
+            inplace_modifier = kwargs.pop('inplace_modifier', default_arrays_modifier_hgcal)
+            iterator = uproot.iterate(rootfiles, self.treename, **kwargs)
+            total = len(rootfiles)
         if progressbar:
             iterator = tqdm(iterator, total=total, desc='arrays' if use_cache else 'root files')
         for arrays in iterator:
@@ -191,23 +192,29 @@ class Dataset(object):
                 .format(i, i_entry_stop)
                 )
 
+def get_event(rootfile, i=0, **kwargs):
+    """
+    Convenience function to retrieve just the first event from a rootfile
+    """
+    return Dataset(rootfile, **kwargs).get_event(i)
+
 
 # ___________________________________________________
 # arrays modification utils
 
-def default_arrays_modifier_hgcal(arrays):
+def default_arrays_modifier_hgcal(arrays, hit_track_id_branch=b'simhit_fineTrackId', filter_zero_tracks=False):
     """
     Default inplace modification for arrays
     """
-    hit_track_id_branch = b'simhit_fineTrackId'
-    if arrays[b'simhit_fineTrackId'].counts.sum() == 0:
-        # This event was not created saving both regular and fine tracking ID probably
-        logger.warning('Branch simhit_fineTrackId is empty - removing it')
-        del arrays[b'simhit_fineTrackId']
-        hit_track_id_branch = b'simhit_trackId'
     fill_hit_track_index(arrays, hit_track_id_branch=hit_track_id_branch)
     fill_track_vertex(arrays)
-    # filter_tracks_to_origin(arrays, inplace=True)
+    if filter_zero_tracks: filter_tracks_to_origin(arrays, inplace=True)
+
+def default_arrays_modifier_hgcal_nofine(arrays):
+    """
+    Like default_arrays_modifier_hgcal, but for non-fine
+    """
+    default_arrays_modifier_hgcal(arrays, hit_track_id_branch=b'simhit_trackId', filter_zero_tracks=True)
 
 def get_hit_track_index(
     arrays,
@@ -342,6 +349,67 @@ def select_pos(arrays, invert=False):
 def select_neg(arrays):
     return select_pos(arrays, invert=True)
 
+def filter_endcap_crossing_tracks(event):
+    """
+    Looks for tracks that have their vertex in one half of the detector and their position in the other
+    half.
+    These tracks should be very rare.
+    ONLY WORKS ON EVENT LEVEL.
+    """
+    endcap_crossing_tracks = (
+        ((event[b'simtrack_z'] > 1.) & (event[b'simtrack_vertex_z'] < -1.))
+        |
+        ((event[b'simtrack_z'] < -1.) & (event[b'simtrack_vertex_z'] > 1.))
+        )
+    endcap_crossing_track_ids = event[b'simtrack_trackId'][endcap_crossing_tracks]
+    good_track_ids = event[b'simtrack_trackId'][~endcap_crossing_tracks].flatten()
+    if endcap_crossing_tracks.sum()[0] > 0:
+        logger.warning(
+            '%s weird endcap crossing tracks:\n  %s',
+            endcap_crossing_tracks.sum()[0],
+            '\n  '.join([ debug_track(i, event) for i in endcap_crossing_track_ids.content])
+            )
+    else:
+        logger.info('No endcap crossing tracks to filter')
+        return event
+    good_hit_indices = event[b'simhit_fineTrackId'].ones_like().astype(np.bool)
+    for track_id in np.unique(endcap_crossing_track_ids.content):
+        good_hit_indices[event[b'simhit_fineTrackId'] == track_id] = False
+    return select(
+        event,
+        sel_track = (~endcap_crossing_tracks),
+        sel_hit = good_hit_indices,
+        )
+
+def debug_track(track_id, event, print_now=True):
+    get = event[b'simtrack_trackId'] == track_id
+    if get.sum()[0] == 0:
+        s = 'Track {} not in passed event!'.format(track_id)
+    else:
+        s = (
+            'Track {i}'
+            ' pdgid={pdgid}'
+            ' crossed_bound={crossed_boundary}'
+            ' E_corrBound={energy_atbound:.4f}'
+            ' E_mom={energy_plain:.4f}'
+            ' vertex=({vx:.2f},{vy:.2f},{vz:.2f})'
+            ' pos=({x:.2f},{y:.2f},{z:.2f})'
+            .format(
+                i = track_id,
+                crossed_boundary = event[b'simtrack_crossedBoundary'][get][0,0],
+                pdgid = event[b'simtrack_pdgid'][get][0,0],
+                energy_atbound = event[b'simtrack_correctedMomentumAtBoundary'][get][0,0].E,
+                energy_plain = event[b'simtrack_momentum'][get][0,0].E,
+                vx = event[b'simtrack_vertex_x'][get][0,0],
+                vy = event[b'simtrack_vertex_y'][get][0,0],
+                vz = event[b'simtrack_vertex_z'][get][0,0],
+                x = event[b'simtrack_x'][get][0,0],
+                y = event[b'simtrack_y'][get][0,0],
+                z = event[b'simtrack_z'][get][0,0]
+                )
+            )
+    if print_now: logger.info(s)
+    return s
 
 # ___________________________________________________
 # plotting
@@ -370,6 +438,7 @@ def color_pdgid(pdgid, default_value='xkcd:gray'):
     return color
 
 Z_POS_LAYERS = [
+    320.5,
     322.103, 323.047, 325.073, 326.017, 328.043, 328.987, 331.013,
     331.957, 333.983, 334.927, 336.953, 337.897, 339.923, 340.867,
     342.893, 343.837, 345.863, 346.807, 348.833, 349.777, 351.803,
@@ -380,6 +449,7 @@ Z_POS_LAYERS = [
     513.149
     ]
 Z_NEG_LAYERS = [
+    -320.5,
     -322.103, -323.047, -325.073, -326.017, -328.043, -328.987, -331.013,
     -331.957, -333.983, -334.927, -336.953, -337.897, -339.923, -340.867,
     -342.893, -343.837, -345.863, -346.807, -348.833, -349.777, -351.803,
@@ -397,12 +467,15 @@ HGCAL_ZMAX_NEG = max(Z_NEG_LAYERS)
 
 
 @contextmanager
-def save_plots(flag=True, dir=None):
+def save_plots(dir='.', flag=True):
     try:
         current_flag = PlotBase.SAVEPLOTS
         current_dir = PlotBase.PLOTDIR
         PlotBase.SAVEPLOTS = flag
-        if dir: PlotBase.PLOTDIR = dir
+        from time import strftime
+        dir = dir.replace('%d', strftime('%b%d'))
+        PlotBase.PLOTDIR = dir
+        if not osp.isdir(dir): os.makedirs(dir)
         yield PlotBase.PLOTDIR
     finally:
         PlotBase.SAVEPLOTS = current_flag
@@ -415,30 +488,78 @@ class PlotBase(object):
     SAVEPLOTS = False
     PLOTDIR = '.'
 
+    def get_color_for_id(self, i):
+        # Load all possible colors from matplotlib
+        if self.all_colors is None: self.all_colors = list(mcd.XKCD_COLORS.keys())
+        # Add color to the map if the id is not in there yet
+        if not i in self._color_per_id:
+            # Restart wheel if out of colors
+            if len(self.all_colors) == 0:
+                logger.error('OUT OF COLORS! Restarting color wheel')
+                self.all_colors = None
+                return self.get_color_for_id(i)
+            i_picked_color = np.random.randint(len(self.all_colors))
+            self._color_per_id[i] = self.all_colors.pop(i_picked_color)
+        return self._color_per_id[i]
+
     def __init__(self):
+        self.all_colors = None
+        self._color_per_id = {}
         self.ax = None
 
     
+def plot_events(rootfile, nmax=None, nofine=False, save=None, color_by='pdgid', title=None, istart=None, progressbar=False):
+    """
+    Quick function to make plots
+    """
+    if 'Dataset' in rootfile.__class__.__name__: # Poor man's isinstance
+        data = rootfile
+    else:
+        if nofine:
+            data = Dataset(rootfile, inplace_modifier=default_arrays_modifier_hgcal_nofine)
+        else:
+            data = Dataset(rootfile)
+    n_plotted = 0
+    for i_event, event in enumerate(data.iterate_events(progressbar=progressbar)):
+        if not(istart is None) and i_event < istart: continue
+        logger.info('Event %s', i_event)
+        if not save is None: Plot3DSingleEndcap.SAVEPLOTS = save
+        if title: Plot3DSingleEndcap.title = title.replace('%i', str(i_event))
+        fig = Plot3DSingleEndcap.plot_both_endcaps(event, trim_tracks='both', color_by=color_by, only_if_left_hit=True, nofine=nofine)
+        n_plotted += 1
+        if not(nmax is None) and n_plotted >= nmax: break
+    return event
+
 class Plot3DSingleEndcap(PlotBase):
 
     title = 'plot3d'
 
     @classmethod
-    def plot_both_endcaps(cls, arrays, trim_tracks=True, title=None):
+    def plot_both_endcaps(cls, arrays, trim_tracks=True, title=None, color_by='pdgid', only_if_left_hit=False, nofine=False):
         from ipywidgets.widgets.interaction import show_inline_matplotlib_plots
-        fig = plt.figure(figsize=(23,11))
+        fig = plt.figure(figsize=(35,17))
         ax1 = fig.add_subplot(121, projection='3d')
         logger.debug('PLOTTING MINUS ENDCAP')
-        cls(arrays, pos=False, ax=ax1).plot(trim_tracks=trim_tracks)
+        instance_neg = cls(arrays, pos=False, ax=ax1)
+        instance_neg.color_by = color_by
+        instance_neg.only_if_left_hit = only_if_left_hit
+        instance_neg.ignore_fine = nofine
+        instance_neg.plot(trim_tracks=trim_tracks)
         ax2 = fig.add_subplot(122, projection='3d')
         logger.debug('PLOTTING PLUS ENDCAP')
-        cls(arrays, pos=True, ax=ax2).plot(trim_tracks=trim_tracks)
+        instance_pos = cls(arrays, pos=True, ax=ax2)
+        instance_pos.color_by = color_by
+        instance_pos.only_if_left_hit = only_if_left_hit
+        instance_pos.ignore_fine = nofine
+        instance_pos.plot(trim_tracks=trim_tracks)
         if cls.SAVEPLOTS:
             dst = osp.join(cls.PLOTDIR, (cls.title if title is None else title) + '.png')
             if not osp.isdir(osp.dirname(dst)): os.makedirs(osp.dirname(dst))
+            logger.info('Saving to %s', dst)
             fig.savefig(dst, bbox_inches='tight', dpi=300)
             fig.savefig(dst.replace('.png', '.pdf'), bbox_inches='tight')
             plt.close()
+            gc.collect()
         else:
             show_inline_matplotlib_plots()
     
@@ -450,10 +571,20 @@ class Plot3DSingleEndcap(PlotBase):
                 self.__class__.__name__, numentries(arrays)
                 )
         event = { k : v[:1] for k, v in arrays.items() }
+        event = filter_endcap_crossing_tracks(event)
         self.event = select_pos(event) if pos else select_neg(event)
         self.ax = ax
         self.zmin = HGCAL_ZMIN_POS if pos else HGCAL_ZMIN_NEG
         self.zmax = HGCAL_ZMAX_POS if pos else HGCAL_ZMAX_NEG
+
+        self.color_by = 'pdgid'
+        self.only_if_left_hit = True
+        self.only_primary = False
+        self.indicate_track_begin_point = False
+        self.draw_boundary_point = True
+        self.indicate_no_parent = False
+        self.scale_hits = True
+        self.ignore_fine = False
     
     def get_ax(self):
         if self.ax is None:
@@ -503,26 +634,33 @@ class Plot3DSingleEndcap(PlotBase):
         ax.plot(
             [self.zmin, self.zmax], [0., 0.], [0., 0.],
             c = 'xkcd:magenta',
-            linewidth = 0.2
+            linewidth = 0.2, linestyle='-'
             )
     
-    def plot_hits_per_pdgid(self):
+    def plot_hits(self):
         ax = self.get_ax()
         hit_x = self.event[b'simhit_x'][0]
         hit_y = self.event[b'simhit_y'][0]
         hit_z = self.event[b'simhit_z'][0]
-        hit_energy = self.event[b'simhit_energy'][0]
-        hit_pdgid = self.event[b'simhit_pdgid'][0]
-        unique_pdgids = np.unique(np.abs(hit_pdgid))
-        for pdgid in unique_pdgids:
-            select_hits = (np.abs(hit_pdgid) == pdgid) & (hit_z <= self.zmax) & (hit_z >= self.zmin)
+        if self.scale_hits: hit_energy = self.event[b'simhit_energy'][0]
+        if self.color_by == 'pdgid':
+            hit_id = self.event[b'simhit_pdgid'][0]
+            unique_ids = np.unique(np.abs(hit_id))
+            get_color = lambda id: color_pdgid(int(id))
+        elif self.color_by == 'trackid':
+            hit_id = self.event[b'simhit_trackId' if ignore_fine else b'simhit_fineTrackId'][0]
+            unique_ids = np.unique(np.abs(hit_id))
+            get_color = lambda id: self.get_color_for_id(int(id))
+        for id in unique_ids:
+            if self.only_primary and not id in [1,2]: continue
+            select_hits = (np.abs(hit_id) == id) & (hit_z <= self.zmax) & (hit_z >= self.zmin)
             ax.scatter(
                 hit_z[select_hits],
                 hit_x[select_hits],
                 hit_y[select_hits],
-                c = color_pdgid(int(pdgid)),
-                s = 10000. * hit_energy[select_hits],
-                label = '{0:0d}'.format(int(pdgid))
+                c = get_color(id),
+                **({'s' : 10000. * hit_energy[select_hits]} if self.scale_hits else {}),
+                # label = '{0:0d}'.format(int(id))
                 )
 
     def compose_line_segments(self, x_in, x_out, y_in, y_out, z_in, z_out):
@@ -533,30 +671,90 @@ class Plot3DSingleEndcap(PlotBase):
         z = np.stack((z_in, z_out, nones)).T.flatten()
         return list(x), list(y), list(z)
 
-    def plot_tracks_per_pdgid(self, trim=True, indicate_no_parent=True):
+    def plot_tracks(self, trim=True):
         ax = self.get_ax()
+        trackid = self.event[b'simtrack_trackId'][0]
         x_in = self.event[b'simtrack_vertex_x'][0]
         y_in = self.event[b'simtrack_vertex_y'][0]
         z_in = self.event[b'simtrack_vertex_z'][0]
         x_out = self.event[b'simtrack_x'][0]
         y_out = self.event[b'simtrack_y'][0]
         z_out = self.event[b'simtrack_z'][0]
+        crossed_boundary = self.event[b'simtrack_crossedBoundary'][0]
+        x_boundary = self.event[b'simtrack_xAtBoundary'][0]
+        y_boundary = self.event[b'simtrack_yAtBoundary'][0]
+        z_boundary = self.event[b'simtrack_zAtBoundary'][0]
         no_parent = self.event[b'simtrack_noParent'][0]
-        x = np.stack((x_in, x_out)).T
-        y = np.stack((y_in, y_out)).T
-        z = np.stack((z_in, z_out)).T
         track_pdgid = self.event[b'simtrack_pdgid'][0]
+        track_energy = self.event[b'simtrack_momentum'][0].E
+        track_energy_at_boundary = self.event[b'simtrack_correctedMomentumAtBoundary'][0].E
+
+        if self.only_if_left_hit:
+            import numpy_indexed as npi
+            all_track_ids = self.event[b'simtrack_trackId'][0].flatten()
+            track_ids_per_hit = np.unique(self.event[b'simtrack_trackId' if self.ignore_fine else b'simhit_fineTrackId'].content)
+            if not(self.ignore_fine):
+                # There are some weird tracks that originated in one endcap and left a hit in the other...
+                # Probably very low-energy random Geant stuff...
+                erroneous_track_ids = np.array(list(set(track_ids_per_hit) - set(all_track_ids)))
+                if erroneous_track_ids:
+                    for i in erroneous_track_ids:
+                        debug_track(i, self.event)
+                    raise RuntimeError(
+                        'Still weird tracks: {}'.format(erroneous_track_ids)
+                        )
+            index_tracks_that_left_hit = npi.indices(all_track_ids, track_ids_per_hit)
+            trackid = trackid[index_tracks_that_left_hit]
+            x_in = x_in[index_tracks_that_left_hit]
+            y_in = y_in[index_tracks_that_left_hit]
+            z_in = z_in[index_tracks_that_left_hit]
+            x_out = x_out[index_tracks_that_left_hit]
+            y_out = y_out[index_tracks_that_left_hit]
+            z_out = z_out[index_tracks_that_left_hit]
+            crossed_boundary = crossed_boundary[index_tracks_that_left_hit]
+            x_boundary = x_boundary[index_tracks_that_left_hit]
+            y_boundary = y_boundary[index_tracks_that_left_hit]
+            z_boundary = z_boundary[index_tracks_that_left_hit]
+            no_parent = no_parent[index_tracks_that_left_hit]
+            track_pdgid = track_pdgid[index_tracks_that_left_hit]
+            track_energy = track_energy[index_tracks_that_left_hit]
+            track_energy_at_boundary = track_energy_at_boundary[index_tracks_that_left_hit]
+
+        if self.draw_boundary_point:
+            x = np.stack((x_in, x_boundary, x_out)).T
+            y = np.stack((y_in, y_boundary, y_out)).T
+            z = np.stack((z_in, z_boundary, z_out)).T
+        else:
+            x = np.stack((x_in, x_out)).T
+            y = np.stack((y_in, y_out)).T
+            z = np.stack((z_in, z_out)).T
+
         # Store coordinates where to draw a "no parent indicator" (a cross), and draw in 1 go later
         no_parent_indicator_coordinates = []
-        for i in range(x.shape[0]):
-            this_color = color_pdgid(int(track_pdgid[i]))
+        n_tracks = x.shape[0]
+        iterator = tqdm(range(n_tracks), total=n_tracks, desc='tracks') if n_tracks > 500 else range(n_tracks)
+        e_tracks = 0.
+        for i in iterator:
+            if self.only_primary and not int(trackid[i]) in [1,2]: continue
+            if int(trackid[i]) in [ 30785, 30786, 30831 ]: continue
+            this_color = color_pdgid(int(track_pdgid[i])) if self.color_by == 'pdgid' else self.get_color_for_id(trackid[i])
             this_x, this_y, this_z = x[i], y[i], z[i]
+            energy = track_energy_at_boundary[i] if crossed_boundary[i] else track_energy[i]
+            e_tracks += energy
+            # If drawing boundary points, skip boundary points for tracks that didn't cross the boundary
+            if self.draw_boundary_point:
+                if not crossed_boundary[i]:
+                    this_x = this_x[[0,2]]
+                    this_y = this_y[[0,2]]
+                    this_z = this_z[[0,2]]
+                else:
+                    ax.scatter(this_z[1], this_x[1], this_y[1], c=this_color, marker='x', s=35.)
             # First check if at least a part of the track is in this endcap
             if all(this_z < self.zmin) or all(this_z > self.zmax):
                 logger.debug('Track z = %s is outside this endcap (%s - %s)', this_z, self.zmin, self.zmax)
                 continue
             # If partly outside, trim the track to prevent weird lines in the plot
-            if trim:
+            if not self.draw_boundary_point and trim:
                 this_x, this_y, this_z = self.trim_track(x[i], y[i], z[i], self.zmin, self.zmax)
                 logger.debug(
                     'Trimmed track (pdgid %s):\n'
@@ -568,20 +766,57 @@ class Plot3DSingleEndcap(PlotBase):
             ax.plot(
                 this_z, this_x, this_y,
                 c = this_color,
-                linewidth = 0.5 if trim != 'both' else 1.5, # Make thicker if drawing both
+                linewidth = 0.5 if self.draw_boundary_point or trim != 'both' else 1.5, # Make thicker if drawing both
+                label = '{} ({}, E={:.2f})'.format(trackid[i], track_pdgid[i], energy)
+                )
+            i_coord_for_label = 1 if (self.draw_boundary_point and len(this_z)==3) else 0
+            ax.text(
+                this_z[i_coord_for_label], this_x[i_coord_for_label], this_y[i_coord_for_label],
+                r'$\mathbf{{{}}}_{{{},\,E={:.1f}}}$'.format(trackid[i], track_pdgid[i], energy),
+                color=this_color,
+                fontsize=14,
+                horizontalalignment='left' if this_z[-1] < 0. else 'right'
                 )
             # Save in-coordinates if no parent
             if no_parent[i]:
                 no_parent_indicator_coordinates.append([this_x[0], this_y[0], this_z[0]])
             # Draw untrimmed track if asked
-            if trim == 'both':
+            if not self.draw_boundary_point and trim == 'both':
                 ax.plot(
                     z[i], x[i], y[i],
                     c = this_color,
                     linewidth = 0.5
                     )
+            if self.indicate_track_begin_point:
+                ax.scatter(this_z[0], this_x[0], this_y[0], c=this_color, marker='x', s=20.)
+
+
+        ax.text2D(
+            0.3, 0.8, 'Sum of track energies = {:.2f} GeV'.format(e_tracks),
+            horizontalalignment='left', verticalalignment='top',
+            transform=ax.transAxes,
+            fontsize=18
+            )
+
+        primary_track_selection = (self.event[b'simtrack_trackId'] == 1) | (self.event[b'simtrack_trackId'] == 2)
+        primary_track_id = self.event[b'simtrack_trackId'][primary_track_selection]
+        primary_track_momentum = self.event[b'simtrack_momentum'][primary_track_selection]
+
+        y_display_etrack = 0.77
+        for i, id in enumerate(primary_track_id.content):
+            mom = primary_track_momentum[0,i]
+            ax.text2D(
+                0.3, y_display_etrack,
+                'Track {} Egen = {:.2f} GeV (pt={:.1},eta={:.1f},phi={:.1f})'
+                .format(id, mom.E, mom.pt, mom.eta, mom.phi),
+                horizontalalignment='left', verticalalignment='top',
+                transform=ax.transAxes,
+                fontsize=18
+                )
+            y_display_etrack -= 0.03
+
         # Draw no-parent indicators if asked
-        if indicate_no_parent:
+        if self.indicate_no_parent:
             logger.debug(
                 'Found %s tracks without parents; plotting points at: %s',
                 len(no_parent_indicator_coordinates), no_parent_indicator_coordinates
@@ -590,7 +825,7 @@ class Plot3DSingleEndcap(PlotBase):
             x, y, z = no_parent_indicator_coordinates[0], no_parent_indicator_coordinates[1], no_parent_indicator_coordinates[2]
             ax.scatter(
                 z, x, y,
-                c = 'r',
+                c = 'xkcd:purple',
                 marker = 'x',
                 s = 100.,
                 label = 'Tracks w/o parent'
@@ -610,6 +845,6 @@ class Plot3DSingleEndcap(PlotBase):
         ax.set_zlabel('y')
         
         self.plot_beamline()
-        self.plot_hits_per_pdgid()
-        self.plot_tracks_per_pdgid(trim=trim_tracks)
-        ax.legend()
+        self.plot_hits()
+        self.plot_tracks(trim=trim_tracks)
+        ax.legend(fontsize=18)
