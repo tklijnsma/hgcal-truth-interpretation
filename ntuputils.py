@@ -198,6 +198,13 @@ def get_event(rootfile, i=0, **kwargs):
     """
     return Dataset(rootfile, **kwargs).get_event(i)
 
+def iter_events(rootfile, **kwargs):
+    """
+    Convenience function to yield events directly from a rootfile
+    """
+    dataset = Dataset(rootfile, **kwargs)
+    yield from dataset.iterate_events()
+
 
 # ___________________________________________________
 # arrays modification utils
@@ -240,13 +247,12 @@ def get_hit_track_index(
         hit_track_id = all_hit_track_id[i]
         track_id = all_track_id[i]
         n_hits = hit_track_id.shape[0]
-
         if True:
             set_tracks = set(track_id.flatten())
             set_hit_trackids = set(hit_track_id.flatten())
             in_hits_but_not_in_tracks = set_hit_trackids - set_tracks
-            logger.info('in_hits_but_not_in_tracks: %s', in_hits_but_not_in_tracks)
-
+            if in_hits_but_not_in_tracks:
+                logger.info('in_hits_but_not_in_tracks: %s', in_hits_but_not_in_tracks)
         # Get indices for all track ids; this is vectorized fortunately
         hit_track_index = npi.indices(track_id, hit_track_id)
         # logger.debug('event %s', i)
@@ -286,7 +292,9 @@ def fill_track_vertex(arrays):
     arrays[b'simtrack_vertex_x'] = arrays[b'simvertex_x'][vertex_index]
     arrays[b'simtrack_vertex_y'] = arrays[b'simvertex_y'][vertex_index]
     arrays[b'simtrack_vertex_z'] = arrays[b'simvertex_z'][vertex_index]
-    arrays[b'simtrack_noParent'] = arrays[b'simvertex_noParent'][arrays[b'simtrack_vertexIndex']]
+    arrays[b'simtrack_noParent'] = arrays[b'simvertex_noParent'][vertex_index]
+    arrays[b'simtrack_parentTrackId'] = arrays[b'simvertex_parentTrackId'][vertex_index]
+
 
 def filter_tracks_to_origin(arrays, inplace=False):
     """
@@ -600,7 +608,7 @@ class Plot3DSingleEndcap(PlotBase):
     def get_ax(self):
         if self.ax is None:
             self.fig = plt.figure(figsize=(11,11))
-            self.ax = fig.add_subplot(111, projection='3d')
+            self.ax = self.fig.add_subplot(111, projection='3d')
         return self.ax
 
     def trim_track(self, x, y, z, zmin, zmax):
@@ -943,25 +951,8 @@ class DecayTree(PlotBase):
         return G
 
     def plot_graph(self, G=None):
-        import networkx as nx
-        import pygraphviz
-        from networkx.drawing.nx_agraph import graphviz_layout
         if G is None: G = self.make_graph()
-        pos = graphviz_layout(G, prog='twopi', args='')
-        fig = plt.figure(figsize=(8, 8))
-        pdgids = np.array([d.get('pdgid', 0) for n, d in G.nodes(data=True)])
-        node_color = color_pdgid(pdgids)
-        energies = np.array([d.get('energy', 10.) for n, d in G.nodes(data=True)])
-        normed_energies = 100. * np.log(energies + 1.) / np.max(np.log(energies + 1.))
-        nx.draw(
-            G, pos,
-            node_color = node_color,
-            node_size = normed_energies,
-            alpha = 0.5,
-            with_labels = self.with_labels,
-            )
-        plt.axis('equal')
-
+        plot_graph(G, with_labels=self.with_labels)
         if self.SAVEPLOTS:
             dst = osp.join(self.PLOTDIR, self.title + '.png')
             if not osp.isdir(osp.dirname(dst)): os.makedirs(osp.dirname(dst))
@@ -972,3 +963,23 @@ class DecayTree(PlotBase):
             gc.collect()
         else:
             show_inline_matplotlib_plots()
+
+def plot_graph(G, with_labels=True, labels=None, prog='twopi'):
+    import networkx as nx
+    import pygraphviz
+    from networkx.drawing.nx_agraph import graphviz_layout
+    pos = graphviz_layout(G, prog=prog, args='')
+    fig = plt.figure(figsize=(8, 8))
+    pdgids = np.array([d.get('pdgid', 0) for n, d in G.nodes(data=True)])
+    node_color = color_pdgid(pdgids)
+    energies = np.array([d.get('energy', 10.) for n, d in G.nodes(data=True)])
+    normed_energies = 100. * np.log(energies + 1.) / np.max(np.log(energies + 1.))
+    nx.draw(
+        G, pos,
+        node_color = node_color,
+        node_size = normed_energies,
+        alpha = 0.5,
+        with_labels = with_labels,
+        labels = labels,
+        )
+    plt.axis('equal')
