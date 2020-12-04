@@ -8,6 +8,11 @@ def traverse(node, yield_depth=False, depth=0):
     for child in node.children:
         yield from traverse(child, yield_depth, depth+1)
 
+def traverse_postorder(node, yield_depth=False, depth=0):
+    for child in node.children:
+        yield from traverse_postorder(child, yield_depth, depth+1)
+    yield (node, depth) if yield_depth else node
+
 def traverse_up(node):
     while True:
         yield node
@@ -36,6 +41,46 @@ def print_tree(root):
     for node, depth in traverse(root, yield_depth=True):
         print('__'*depth + short_repr(node))
 
+def deltar(eta1, phi1, eta2, phi2):
+    dphi = phi1 - phi2
+    # Some normalization of phi - first substract whole 2*pi's,
+    # then flip to -pi < phi < pi regime
+    if isinstance(dphi, float):
+        if dphi > 2.*pi: dphi -= 2.*pi
+        if dphi < -2.*pi: dphi += 2.*pi
+        if dphi > pi: dphi -= 2.*pi
+        if dphi < -pi: dphi += 2.*pi
+    else:
+        dphi[dphi > 2.*pi] -= 2.*pi
+        dphi[dphi < -2.*pi] += 2.*pi
+        dphi[dphi > pi] -= 2.*pi
+        dphi[dphi < -pi] += 2.*pi
+    dr = np.sqrt( dphi**2 + (eta1-eta2)**2 )
+    return dr
+
+def deltar_tracks(t1, t2):
+    p1, p2 = t1.momentum, t2.momentum
+    return deltar(p1.eta, p1.phi, p2.eta, p2.phi)
+
+def hitcentroid(track):
+    if track.nhits == 0: return None
+    if track.nhits == 1: return np.array([track.hits[0].x, track.hits[0].y, track.hits[0].z])
+    positions = np.array([ hit.energy * np.array([hit.x, hit.y, hit.z]) for hit in track.hits ])
+    positions /= sum([ hit.energy for hit in track.hits ])
+    centroid = positions.sum(axis=0)
+    # Check if point on the track at same norm of centroid is approximately the same
+    # print(centroid)
+    # origin = np.array([track.vertex_x, track.vertex_y, track.vertex_z])
+    # pos = np.array([track.x, track.y, track.z])
+    # d = pos - origin
+    # d = d / np.linalg.norm(d) * np.linalg.norm(centroid-origin)
+    # print(d)
+    return centroid
+
+def copy_tree(root):
+    import copy
+    return copy.deepcopy(root)
+
 class Track(object):
     def __init__(self, parent=None, children=None, **kwargs):
         self.parent = parent
@@ -44,19 +89,32 @@ class Track(object):
         self.nhits = 0
         self.hits = []
         
-    def traverse(self):
-        for node in traverse(self):
-            yield node
-            
-    def traverse_up(self):
-        for node in traverse_up(self):
-            yield node
+    def __deepcopy__(self, memo):
+        import copy
+        cls = self.__class__
+        result = cls.__new__(cls)
+        memo[id(self)] = result
+        for k, v in self.__dict__.items():
+            setattr(result, k, copy.deepcopy(v, memo))
+        return result
 
+    def traverse(self, *args, **kwargs):
+        yield from traverse(self, *args, **kwargs)
+
+    def traverse_up(self, *args, **kwargs):
+        yield from traverse_up(self, *args, **kwargs)
+
+    def traverse_postorder(self, *args, **kwargs):
+        yield from traverse_postorder(self, *args, **kwargs)
+            
     def get_by_id(self, trackid):
         return get_by_id(self, trackid)
     
     def print(self):
         print_tree(self)
+
+    def deltar(self, other):
+        return deltar_tracks(self, other)
 
     def get(self, key, ndec=2):
         if not key in self.__dict__:
@@ -164,6 +222,16 @@ def build_tree(event, include_hits=True):
             ntuputils.logger.info('Adding %s as a root', track)
     return roots
 
+def trim_tree(root, inplace=False):
+    if not inplace: root = copy_tree(root) # Keep original tree intact
+    for node in list(traverse(root)): # No generator, since children are modified in loop
+        # If node is not a root, has children, but has no hits, trim it
+        if not(node.parent is None) and node.children and node.nhits == 0:
+            node.parent.children.remove(node)
+            node.parent.children.extend(node.children)
+            for child in node.children:
+                child.parent = node.parent
+    return root
 
 def make_graph(node):
     import networkx as nx
@@ -203,7 +271,8 @@ def make_graph(node):
 
 def plot_graph(node, *args, **kwargs):
     G = make_graph(node)
-    ntuputils.plot_graph(G, *args, labels=G.mylabels, **kwargs)
+    labels = G.mylabels if kwargs.pop('labels', True) else None
+    ntuputils.plot_graph(G, *args, labels=labels, **kwargs)
 
 
 def plot_node(node, ax=None, labels=True, plot_hits=True):
@@ -264,7 +333,17 @@ def plot_node(node, ax=None, labels=True, plot_hits=True):
     return ax
 
 
-def plot_node_rotated(node, scale_large_norm=True, ax=None, labels=True, plot_hits=True, plot_clusters=False):
+def plot_node_rotated(
+        node,
+        scale_large_norm=True,
+        ax=None,
+        labels=True,
+        plot_hits=True,
+        plot_clusters=False,
+        color_by_pdgid=True,
+        zmin=None,
+        zmax=None
+        ):
     """
     Puts the given track on the z-axis (the part from vertex to boundary
     crossing, or position if the track does not cross a boundary).
@@ -311,9 +390,8 @@ def plot_node_rotated(node, scale_large_norm=True, ax=None, labels=True, plot_hi
     max_perpendicular_dim = 0.
     max_longitudinal_dim = 0.
     
-    for i_track, track in enumerate(node.traverse()):
-        if plot_clusters and not hasattr(track, 'cluster'): continue
-        c = ntuputils.color_pdgid(track.pdgid)
+    for i_track, track in enumerate(traverse(node)):
+        c = ntuputils.color_pdgid(track.pdgid) if color_by_pdgid else ntuputils.color_for_id(track.trackid)
 
         vertex = np.array([track.vertex_x, track.vertex_y, flipz*track.vertex_z]) - origin
         vertex_norm = np.linalg.norm(vertex)
@@ -324,10 +402,11 @@ def plot_node_rotated(node, scale_large_norm=True, ax=None, labels=True, plot_hi
         position /= position_norm if position_norm > 0. else 1.
 
         if plot_clusters:
-            positions = np.array([ np.array((hit.x, hit.y, flipz*hit.z)) - origin for hit in track.cluster.hits() ])
-            positions = rotate(positions)
-            sizes = 10000. * np.array([ hit.energy for hit in track.cluster.hits() ])
-            ax.scatter(positions[:,2], positions[:,0], positions[:,1], s=sizes)        
+            positions = np.array([ np.array((hit.x, hit.y, flipz*hit.z)) - origin for hit in track.hits() ])
+            if positions.shape[0] > 0: 
+                positions = rotate(positions)
+                sizes = 10000. * np.array([ hit.energy for hit in track.hits() ])
+                ax.scatter(positions[:,2], positions[:,0], positions[:,1], s=sizes, c=c)
         elif plot_hits and track.nhits > 0:
             positions = np.array([ np.array((hit.x, hit.y, flipz*hit.z)) - origin for hit in track.hits ])
             positions = rotate(positions)
@@ -370,7 +449,7 @@ def plot_node_rotated(node, scale_large_norm=True, ax=None, labels=True, plot_hi
 
         if labels:
             ax.text(
-                z[-2], x[-2], y[-2],
+                z[-1], x[-1], y[-1],
                 r'$\mathbf{{{}}}_{{{},\,E={:.1f}}}$'.format(track.trackid, track.pdgid, track.energy),
                 color=c,
                 fontsize=14,
@@ -387,8 +466,8 @@ def plot_node_rotated(node, scale_large_norm=True, ax=None, labels=True, plot_hi
     max_perpendicular_dim *= 0.7
     max_perpendicular_dim = max(10., max_perpendicular_dim) # Ensure some minimum dimension
     
-    zmin = 0.
-    zmax = min(ntuputils.HGCAL_ZMAX_POS, max_longitudinal_dim)
+    if zmin is None: zmin = 0.
+    if zmax is None: zmax = min(ntuputils.HGCAL_ZMAX_POS, max_longitudinal_dim)
 
     ax.set_xlim(zmin, zmax)
     ax.set_xlabel('z')
@@ -396,3 +475,113 @@ def plot_node_rotated(node, scale_large_norm=True, ax=None, labels=True, plot_hi
     ax.set_zlabel('y')
     ax.set_ylim(-max_perpendicular_dim, max_perpendicular_dim)
     ax.set_zlim(-max_perpendicular_dim, max_perpendicular_dim)
+
+    ax.text2D(
+        0.1, 0.85,
+        'Track {} E={:.2f} n_tracks={}'
+        .format(
+            node.trackid, node.energy, len(list(traverse(node)))
+            ),
+        color=ntuputils.color_pdgid(node.pdgid) if color_by_pdgid else ntuputils.color_for_id(node.trackid),
+        fontsize=14,
+        horizontalalignment='left',
+        verticalalignment='top',
+        transform=ax.transAxes
+        )
+
+
+# ____________________________________________________
+# Clustering algorithms
+
+
+class Cluster(object):
+    """
+    Much like a track object but has other Clusters as children.
+    The same tree algo's should work on this object.
+    Attribute calls will be tried on the track object too, so you can 
+    do Cluster.trackid or Cluster.pt.
+    
+    To get all hits in a cluster, use Cluster.hits(), which will loop
+    over all tracks in the cluster and yield the hits accordingly
+    """
+    
+    def __init__(self, track, parent=None):
+        self.track = track
+        self.parent = parent
+        self.tracks = []
+        self.children = []
+        
+    def __getattr__(self, key):
+        try:
+            super().__getattr__(key)
+        except AttributeError:
+            return getattr(self.track, key)
+        
+    def hits(self):
+        for track in self.tracks:
+            for hit in track.hits:
+                yield hit
+
+def print_clustering(node):
+    """
+    Prints a shortened representatino of tracks along with a clear mark where a
+    new cluster begins
+    """
+    def shortrepr(track):
+        if track.parent:
+            efrac = track.energy / track.parent.energy
+            dr = deltar_tracks(track.parent, track)
+            info = 'dr={:.2f} efrac={:.2f} e={:.2f}'.format(dr, efrac, track.energy)
+        else:
+            info = 'e={:.2f}'.format(track.energy)
+        return (
+            '{} {}'.format(track.trackid, info)
+            + (' CLUSTER' if track.merge is False else '')
+            )
+    for track, depth in traverse(node, yield_depth=True):
+        print('__'*depth + shortrepr(track))
+                
+def traverse_unmergeable_daughters(node, parent=None):
+    """
+    Traverses only unmergeable nodes. `parent` refers to the first unmergeable parent (not the actual parent)
+    """
+    if node.merge is False:
+        # If the node is not merged, it is a cluster
+        yield node, parent
+        parent = node
+    for child in node.children:
+        yield from traverse_unmergeable_daughters(child, parent=parent)
+        
+def traverse_mergeable_daughters(node, except_first=True):
+    """
+    Traverses only mergeable daughters of a node; daughter nodes that are not mergeable are skipped.
+    The node itself should always be yielded, hence the except_first argument
+    """
+    if except_first or node.merge is True:
+        yield node
+        for child in node.children:
+            yield from traverse_mergeable_daughters(child, except_first=False)
+
+def clusterize(root):
+    """
+    Builds a tree of Cluster objects, and returns root clusters
+    """
+    root_cluster = None
+    # Temporary map of nodes to clusters
+    node_to_cluster = {}
+    for node, parent in traverse_unmergeable_daughters(root):
+        cluster = Cluster(node, parent=parent)
+        node_to_cluster[node] = cluster
+        if parent is None:
+            root_cluster = cluster
+        else:
+            node_to_cluster[parent].children.append(cluster)
+        cluster.tracks = list(traverse_mergeable_daughters(node))
+    return root_cluster
+
+def clusterize_decorator(merging_algo):
+    def wrapper(*args, **kwargs):
+        merging_algo(*args, **kwargs) # Apply the merging algorith
+        node = args[0] # Assume the node is the first argument
+        return clusterize(node) # Return the root cluster
+    return wrapper

@@ -42,7 +42,7 @@ else:
     from tqdm import tqdm
 
 @contextmanager
-def temporarily_set_loglevel(loglevel=logging.WARNING):
+def loglevel(loglevel=logging.WARNING):
     """
     Temporarily sets the logging level to some other level
     """
@@ -452,6 +452,19 @@ def color_pdgid(pdgid, default_value='xkcd:gray'):
     else:
         color = PDGID_COLORS.get(abs(pdgid), default_value)
     return color
+
+_all_colors = list(mcd.XKCD_COLORS.keys())
+_assigned_colors = {}
+np.random.seed(44)
+def color_for_id(i):
+    global _assigned_colors, _all_colors
+    if not i in _assigned_colors:
+        i_picked_color = np.random.randint(len(_all_colors))
+        _assigned_colors[i] = _all_colors.pop(i_picked_color)
+        if len(_all_colors) == 0:
+            logger.warning('Out of colors: resetting color wheel')
+            _all_colors = list(mcd.XKCD_COLORS.keys())
+    return _assigned_colors[i]
 
 Z_POS_LAYERS = [
     320.5,
