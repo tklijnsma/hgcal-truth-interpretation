@@ -64,10 +64,11 @@ def deltar_tracks(t1, t2):
 
 def hitcentroid(track):
     if track.nhits == 0: return None
-    if track.nhits == 1: return np.array([track.hits[0].x, track.hits[0].y, track.hits[0].z])
-    positions = np.array([ hit.energy * np.array([hit.x, hit.y, hit.z]) for hit in track.hits ])
-    positions /= sum([ hit.energy for hit in track.hits ])
-    centroid = positions.sum(axis=0)
+    if track.nhits == 1: return np.array([track.hits[0].x, track.hits[0].y, track.hits[0].z]), 0.
+    e_total = sum([ hit.energy for hit in track.hits ])
+    centroid = np.array(
+        [ hit.energy/e_total * np.array([hit.x, hit.y, hit.z]) for hit in track.hits ]
+        ).sum(axis=0)
     # Check if point on the track at same norm of centroid is approximately the same
     # print(centroid)
     # origin = np.array([track.vertex_x, track.vertex_y, track.vertex_z])
@@ -75,7 +76,10 @@ def hitcentroid(track):
     # d = pos - origin
     # d = d / np.linalg.norm(d) * np.linalg.norm(centroid-origin)
     # print(d)
-    return centroid
+    variance = np.sqrt(np.array(
+        [ (hit.energy/e_total * np.linalg.norm(np.array([hit.x, hit.y, hit.z])-centroid))**2 for hit in track.hits ]
+        ).sum(axis=0))
+    return centroid, variance
 
 def copy_tree(root):
     import copy
@@ -88,6 +92,8 @@ class Track(object):
         self.__dict__.update(kwargs)
         self.nhits = 0
         self.hits = []
+        self.centroid = None
+        self.secondmoment = None
         
     def __deepcopy__(self, memo):
         import copy
@@ -95,7 +101,11 @@ class Track(object):
         result = cls.__new__(cls)
         memo[id(self)] = result
         for k, v in self.__dict__.items():
-            setattr(result, k, copy.deepcopy(v, memo))
+            if k == 'hits':
+                # Only do a shallow copy of the hits list (We're not modifying hits anyway)
+                setattr(result, k, copy.copy(v))
+            else:
+                setattr(result, k, copy.deepcopy(v, memo))
         return result
 
     def traverse(self, *args, **kwargs):
@@ -135,6 +145,15 @@ class Track(object):
                 )
             )
     
+    def get_centroid(self):
+        if self.centroid is None: self.centroid, self.secondmoment = hitcentroid(self)
+        return self.centroid
+
+    def get_secondmoment(self):
+        if self.centroid is None: self.centroid, self.secondmoment = hitcentroid(self)
+        return self.secondmoment
+
+
 class Hit(object):
     def __init__(self, detid, x, y, z, energy, parent):
         self.detid, self.x, self.y, self.z, self.energy, self.parent = detid, x, y, z, energy, parent

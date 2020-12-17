@@ -977,7 +977,7 @@ class DecayTree(PlotBase):
         else:
             show_inline_matplotlib_plots()
 
-def plot_graph(G, with_labels=True, labels=None, prog='twopi'):
+def plot_graph(G, with_labels=True, labels=None, prog='twopi', ax=None):
     import networkx as nx
     import pygraphviz
     from networkx.drawing.nx_agraph import graphviz_layout
@@ -994,5 +994,6 @@ def plot_graph(G, with_labels=True, labels=None, prog='twopi'):
         alpha = 0.5,
         with_labels = with_labels,
         labels = labels,
+        **({} if ax is None else {'ax':ax})
         )
     plt.axis('equal')
