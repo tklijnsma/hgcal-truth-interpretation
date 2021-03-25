@@ -42,7 +42,7 @@ else:
     from tqdm import tqdm
 
 @contextmanager
-def loglevel(loglevel=logging.WARNING):
+def loglevel(loglevel=logging.DEBUG):
     """
     Temporarily sets the logging level to some other level
     """
@@ -222,6 +222,20 @@ def default_arrays_modifier_hgcal_nofine(arrays):
     Like default_arrays_modifier_hgcal, but for non-fine
     """
     default_arrays_modifier_hgcal(arrays, hit_track_id_branch=b'simhit_trackId', filter_zero_tracks=True)
+
+
+def default_arrays_modifier_hgcal_newstyle(arrays, hit_track_id_branch=b'simhit_trackId', filter_zero_tracks=False):
+    """
+    Default inplace modification for arrays
+    """
+    default_arrays_modifier_hgcal(
+        arrays,
+        hit_track_id_branch=b'simhit_trackId',
+        filter_zero_tracks=False
+        )
+    # Just create these names so I don't have to update the plotting script
+    arrays[b'simhit_fineTrackId'] = arrays[b'simhit_trackId']
+    arrays[b'simhit_fineTrackId_index'] = arrays[b'simhit_trackId_index']
 
 def get_hit_track_index(
     arrays,
@@ -466,6 +480,18 @@ def color_for_id(i):
             _all_colors = list(mcd.XKCD_COLORS.keys())
     return _assigned_colors[i]
 
+def shuffle_colors(seed=1001):
+    '''
+    Shuffles only currently assigned colors
+    '''
+    np.random.seed(seed)
+    global _assigned_colors
+    assigned_colors = _assigned_colors.values()
+    np.random.shuffle(assigned_colors)
+    for i, key in enumerate(_assigned_colors):
+        _assigned_colors[key] = assigned_colors[i]
+
+
 Z_POS_LAYERS = [
     320.5,
     322.103, 323.047, 325.073, 326.017, 328.043, 328.987, 331.013,
@@ -537,24 +563,43 @@ class PlotBase(object):
         self.ax = None
 
     
-def plot_events(rootfile, nmax=None, nofine=False, save=None, color_by='pdgid', title=None, istart=None, progressbar=False, show=True):
+def plot_events(
+    rootfile,
+    nmax=None,
+    save=None,
+    color_by='pdgid',
+    title=None,
+    istart=None,
+    progressbar=False,
+    show=True,
+    inplace_modifier=None,
+    nofine=False,
+    legend=True,
+    ):
     """
     Quick function to make plots
     """
     if 'Dataset' in rootfile.__class__.__name__: # Poor man's isinstance
         data = rootfile
     else:
-        if nofine:
-            data = Dataset(rootfile, inplace_modifier=default_arrays_modifier_hgcal_nofine)
-        else:
-            data = Dataset(rootfile)
+        if nofine and inplace_modifier is None:
+            inplace_modifier = default_arrays_modifier_hgcal_nofine
+        data = Dataset(rootfile, **({'inplace_modifier' : inplace_modifier} if inplace_modifier else {}) )
     n_plotted = 0
     for i_event, event in enumerate(data.iterate_events(progressbar=progressbar)):
         if not(istart is None) and i_event < istart: continue
         logger.info('Event %s', i_event)
         if not save is None: Plot3DSingleEndcap.SAVEPLOTS = save
         if title: Plot3DSingleEndcap.title = title.replace('%i', str(i_event))
-        fig = Plot3DSingleEndcap.plot_both_endcaps(event, trim_tracks='both', color_by=color_by, only_if_left_hit=True, nofine=nofine, show=show)
+        fig = Plot3DSingleEndcap.plot_both_endcaps(
+            event,
+            trim_tracks='both',
+            color_by=color_by,
+            only_if_left_hit=True,
+            nofine=nofine,
+            show=show,
+            legend=legend
+            )
         n_plotted += 1
         if not(nmax is None) and n_plotted >= nmax: break
     from ipywidgets.widgets.interaction import show_inline_matplotlib_plots
@@ -564,9 +609,21 @@ def plot_events(rootfile, nmax=None, nofine=False, save=None, color_by='pdgid', 
 class Plot3DSingleEndcap(PlotBase):
 
     title = 'plot3d'
+    legend = True
 
     @classmethod
-    def plot_both_endcaps(cls, arrays, trim_tracks=True, title=None, color_by='pdgid', only_if_left_hit=False, nofine=False, show=True):
+    def plot_both_endcaps(
+        cls,
+        arrays,
+        trim_tracks=True,
+        title=None,
+        color_by='pdgid',
+        only_if_left_hit=False,
+        nofine=False,
+        show=True,
+        legend=True,
+        ):
+        cls.legend = legend
         from ipywidgets.widgets.interaction import show_inline_matplotlib_plots
         fig = plt.figure(figsize=(35,17))
         ax1 = fig.add_subplot(121, projection='3d')
@@ -680,7 +737,7 @@ class Plot3DSingleEndcap(PlotBase):
             unique_ids = np.unique(np.abs(hit_id))
             get_color = lambda id: color_pdgid(int(id))
         elif self.color_by == 'trackid':
-            hit_id = self.event[b'simhit_trackId' if ignore_fine else b'simhit_fineTrackId'][0]
+            hit_id = self.event[b'simhit_trackId'][0]
             unique_ids = np.unique(np.abs(hit_id))
             get_color = lambda id: self.get_color_for_id(int(id))
         for id in unique_ids:
@@ -775,7 +832,7 @@ class Plot3DSingleEndcap(PlotBase):
         e_tracks = 0.
         for i in iterator:
             if self.only_primary and not int(trackid[i]) in [1,2]: continue
-            if int(trackid[i]) in [ 30785, 30786, 30831 ]: continue
+            # if int(trackid[i]) in [ 30785, 30786, 30831 ]: continue
             this_color = color_pdgid(int(track_pdgid[i])) if self.color_by == 'pdgid' else self.get_color_for_id(trackid[i])
             this_x, this_y, this_z = x[i], y[i], z[i]
             energy = track_energy_at_boundary[i] if crossed_boundary[i] else track_energy[i]
@@ -886,7 +943,7 @@ class Plot3DSingleEndcap(PlotBase):
         self.plot_beamline()
         self.plot_hits()
         self.plot_tracks(trim=trim_tracks)
-        ax.legend(fontsize=18)
+        if self.legend: ax.legend(fontsize=18)
 
 
 
