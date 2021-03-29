@@ -1,8 +1,8 @@
 from math import pi
 import matplotlib.pyplot as plt
 import numpy as np, logging, os.path as osp, os
-import ntuputils
-
+import hgcalntuptool
+logger = hgcalntuptool.logger
 import numba
 
 def traverse(node, yield_depth=False, depth=0):
@@ -124,7 +124,7 @@ def needs_hit_displacement_quantities(method):
     def wrapper(*args, **kwargs):
         self = args[0]
         if not hasattr(self, '_'+method.__name__):
-            ntuputils.logger.debug('Updating self.update_hit_displacement_quantities()')
+            logger.debug('Updating self.update_hit_displacement_quantities()')
             self.update_hit_displacement_quantities()
         return method(*args, **kwargs)
     return wrapper
@@ -457,7 +457,7 @@ def build_tree(event, include_hits=True):
     for track in tracks:
         if track.parent is None:
             roots.append(track)
-            ntuputils.logger.info('Adding %s as a root', track)
+            logger.info('Adding %s as a root', track)
     return roots
 
 def trim_tree(root, inplace=False):
@@ -507,10 +507,28 @@ def make_graph(node):
 # ____________________________________________________
 # Plotting
 
-def plot_graph(node, *args, **kwargs):
+def plot_graph(node, with_labels=True, labels=None, prog='twopi', ax=None):
+    import networkx as nx
+    import pygraphviz
+    from networkx.drawing.nx_agraph import graphviz_layout
     G = make_graph(node)
-    labels = G.mylabels if kwargs.pop('labels', True) else None
-    ntuputils.plot_graph(G, *args, labels=labels, **kwargs)
+    labels = G.mylabels if labels else None
+    pos = graphviz_layout(G, prog=prog, args='')
+    fig = plt.figure(figsize=(8, 8))
+    pdgids = np.array([d.get('pdgid', 0) for n, d in G.nodes(data=True)])
+    node_color = color_pdgid(pdgids)
+    energies = np.array([d.get('energy', 10.) for n, d in G.nodes(data=True)])
+    normed_energies = 100. * np.log(energies + 1.) / np.max(np.log(energies + 1.))
+    nx.draw(
+        G, pos,
+        node_color = node_color,
+        node_size = normed_energies,
+        alpha = 0.5,
+        with_labels = with_labels,
+        labels = labels,
+        **({} if ax is None else {'ax':ax})
+        )
+    plt.axis('equal')
 
 
 def plot_node(node, ax=None, labels=True, plot_hits=True, color_by_pdgid=True, scale_hitsize=True):
@@ -524,7 +542,7 @@ def plot_node(node, ax=None, labels=True, plot_hits=True, color_by_pdgid=True, s
         ax = fig.add_subplot(111 , projection='3d')
 
     for track in node.traverse():
-        color = ntuputils.color_pdgid(track.pdgid) if color_by_pdgid else ntuputils.color_for_id(track.trackid)
+        color = hgcalntuptool.color_pdgid(track.pdgid) if color_by_pdgid else hgcalntuptool.color_for_id(track.trackid)
         x_in, y_in, z_in = track.vertex_x, track.vertex_y, track.vertex_z
         x_out, y_out, z_out = track.x, track.y, track.z
 
@@ -559,9 +577,9 @@ def plot_node(node, ax=None, labels=True, plot_hits=True, color_by_pdgid=True, s
         pos_endcap = node.z > 0.        
         if pos_endcap:
             zmin = 0.
-            zmax = ntuputils.HGCAL_ZMAX_POS
+            zmax = hgcalntuptool.HGCAL_ZMAX_POS
         else:
-            zmin = ntuputils.HGCAL_ZMIN_NEG
+            zmin = hgcalntuptool.HGCAL_ZMIN_NEG
             zmax = 0.
 
         max_xy_dim = 50.
@@ -609,13 +627,13 @@ def plot_node_rotated(
         - origin
         )
     rotate_position_norm = np.linalg.norm(rotate_position)
-    ntuputils.logger.debug('origin = {}, rotate_position={}, rotate_position_norm={}'.format(origin, rotate_position, rotate_position_norm))
+    logger.debug('origin = {}, rotate_position={}, rotate_position_norm={}'.format(origin, rotate_position, rotate_position_norm))
     
     from numpy import sin, cos, arctan2, arcsin
     dx = arctan2(rotate_position[1],rotate_position[2])
     dy = -arcsin(rotate_position[0] / np.linalg.norm(rotate_position))
-    ntuputils.logger.debug('Rotation angle x-axis: %s', dx)
-    ntuputils.logger.debug('Rotation angle y-axis: %s', dy)
+    logger.debug('Rotation angle x-axis: %s', dx)
+    logger.debug('Rotation angle y-axis: %s', dy)
     Rx = np.array([
         [1., 0., 0.],
         [0., cos(dx), -sin(dx)],
@@ -627,7 +645,7 @@ def plot_node_rotated(
         [-sin(dy), 0., cos(dy)],
         ])
     R = Rx.dot(Ry)
-    ntuputils.logger.debug('Rotation matrix:\n%s', R)
+    logger.debug('Rotation matrix:\n%s', R)
     
     rotate = lambda v: v.dot(Rx.T).dot(Ry.T)
     
@@ -638,7 +656,7 @@ def plot_node_rotated(
     for i_track, track in enumerate(traverse(node)):
         if plot_shower_axis and track.nhits == 0: continue
         total_nhits += track.nhits
-        c = ntuputils.color_pdgid(track.pdgid) if color_by_pdgid else ntuputils.color_for_id(track.trackid)
+        c = hgcalntuptool.color_pdgid(track.pdgid) if color_by_pdgid else hgcalntuptool.color_for_id(track.trackid)
 
         vertex = np.array([track.vertex_x, track.vertex_y, flipz*track.vertex_z]) - origin
         vertex_norm = np.linalg.norm(vertex)
@@ -664,11 +682,11 @@ def plot_node_rotated(
             atbound = rotate(atbound)
             if not plot_shower_axis: ax.scatter(atbound[2], atbound[0], atbound[1], c=c, marker='x', s=35.)
 
-        ntuputils.logger.debug('\ntrack %s %s', i_track, track.trackid)
-        ntuputils.logger.debug('  Unrotated: %s %s', vertex, position)
+        logger.debug('\ntrack %s %s', i_track, track.trackid)
+        logger.debug('  Unrotated: %s %s', vertex, position)
         vertex = rotate(vertex)    
         position = rotate(position)
-        ntuputils.logger.debug('  Rotated:   %s %s', vertex, position)
+        logger.debug('  Rotated:   %s %s', vertex, position)
             
         vertex *= vertex_norm
         position *= position_norm
@@ -678,13 +696,13 @@ def plot_node_rotated(
         # Scale down the track to prevent this
         
         if scale_large_norm and position_norm > 1000.:
-            ntuputils.logger.debug('  Large norm {}: must scale down'.format(position_norm))
+            logger.debug('  Large norm {}: must scale down'.format(position_norm))
             # Get displacement vector from vertex to position
             d = position - vertex
             # Scale it down
             d = d / np.linalg.norm(d) * 500.
             position = vertex + d
-        ntuputils.logger.debug('  Final positions: %s %s', vertex, position)
+        logger.debug('  Final positions: %s %s', vertex, position)
 
         if plot_shower_axis:
             x,y,z = [atbound[0], rcentroid[0]], [atbound[1], rcentroid[1]], [atbound[2], rcentroid[2]]
@@ -714,7 +732,7 @@ def plot_node_rotated(
     max_perpendicular_dim = max(10., max_perpendicular_dim) # Ensure some minimum dimension
     
     if zmin is None: zmin = 0.
-    if zmax is None: zmax = min(ntuputils.HGCAL_ZMAX_POS, max_longitudinal_dim)
+    if zmax is None: zmax = min(hgcalntuptool.HGCAL_ZMAX_POS, max_longitudinal_dim)
 
     ax.set_xlim(zmin, zmax)
     ax.set_xlabel('z')
@@ -729,7 +747,7 @@ def plot_node_rotated(
         .format(
             node.trackid, node.energy, len(list(traverse(node))), total_nhits
             ),
-        color=ntuputils.color_pdgid(node.pdgid) if color_by_pdgid else ntuputils.color_for_id(node.trackid),
+        color=hgcalntuptool.color_pdgid(node.pdgid) if color_by_pdgid else hgcalntuptool.color_for_id(node.trackid),
         fontsize=14,
         horizontalalignment='left',
         verticalalignment='top',
@@ -824,8 +842,8 @@ def make_rotation(axis, include_inverse=False):
     from numpy import sin, cos, arctan2, arcsin
     dx = arctan2(axis[1],axis[2])
     dy = -arcsin(axis[0] / np.linalg.norm(axis))
-    # ntuputils.logger.debug('Rotation angle x-axis: %s', dx)
-    # ntuputils.logger.debug('Rotation angle y-axis: %s', dy)
+    # logger.debug('Rotation angle x-axis: %s', dx)
+    # logger.debug('Rotation angle y-axis: %s', dy)
     Rx = np.array([
         [1., 0., 0.],
         [0., cos(dx), -sin(dx)],
@@ -837,7 +855,7 @@ def make_rotation(axis, include_inverse=False):
         [-sin(dy), 0., cos(dy)],
         ])
     R = Rx.dot(Ry)
-    # ntuputils.logger.debug('Rotation matrix:\n%s', R)
+    # logger.debug('Rotation matrix:\n%s', R)
     rotate = lambda v: v.dot(Rx.T).dot(Ry.T)
     if include_inverse:
         inv_rotate = lambda v: v.dot(Ry).dot(Rx)
@@ -1036,7 +1054,7 @@ def longitudinal_dist(t1, t2):
 
 def overlap(t1, t2, draw=False, use_numba=True):
     if draw and use_numba:
-        ntuputils.logger.warning('Turning off use_numba since draw is active')
+        logger.warning('Turning off use_numba since draw is active')
         use_numba = False
 
     if t2.energyAtBoundary > t1.energyAtBoundary: t1, t2 = t2, t1
@@ -1077,7 +1095,7 @@ def overlap(t1, t2, draw=False, use_numba=True):
             ax.set_zlim(o[1]-15., o[1]+15.)
 
             for t in [t1, t2]:
-                c = ntuputils.color_for_id(t.trackid)
+                c = hgcalntuptool.color_for_id(t.trackid)
                 ax.plot([t.b[2], t.e[2]], [t.b[0], t.e[0]], [t.b[1], t.e[1]], c=c, linewidth=2., linestyle='--')
                 # Also draw axis from .1 to .9 longitudinal energy containment
                 b = t.b + t.longitudinal_energy_containment(.1) * t.axis
@@ -1148,7 +1166,7 @@ def perform_merging_for_node(
     `default_min_r` is the theshold up to which tracks will be merged, i.e.
     distances among tracks >default_min_r will not be merged.
     """
-    ntuputils.logger.debug('Performing merging for leaf parent %s', node.trackid)
+    logger.debug('Performing merging for leaf parent %s', node.trackid)
     # Check whether we're really in a leaf parent
     for c in node.children:
         if c.nhits == 0:
@@ -1165,7 +1183,7 @@ def perform_merging_for_node(
     
     def merge(c1, c2, metric):
         if c2.energy > c1.energy: c1, c2 = c2, c1
-        ntuputils.logger.debug(
+        logger.debug(
             'Merging {} into {}, metric={}'
             .format(c2.trackid, c1.trackid, metric)
             )
@@ -1202,13 +1220,13 @@ def perform_merging_for_node(
         # If the node was a root, the new merged children will just be set as an attribute
         node.children = children
         if is_updated:
-            ntuputils.logger.debug('Updating root children to %s', [c.trackid for c in children])
+            logger.debug('Updating root children to %s', [c.trackid for c in children])
         else:
-            ntuputils.logger.debug('Node is root; no update found!')
+            logger.debug('Node is root; no update found!')
         return is_updated
     else:
         # If the node is not a root, there must always be an update (even if it's only a flattening)
-        ntuputils.logger.debug(
+        logger.debug(
             'Merge of node {}: Adding to parent {} the following children: {}'
             .format(
                 node.trackid, node.parent.trackid, [c.trackid for c in children]
@@ -1217,7 +1235,7 @@ def perform_merging_for_node(
         # If all children are merged into one cluster, but the parent didn't have hits,
         # use the parent pdgid instead
         if node.nhits == 0 and len(children) == 1 and children[0].pdgid != node.pdgid:
-            ntuputils.logger.debug(
+            logger.debug(
                 'Overwriting track {} pdgid={} with pdgid={} since that is its parent'
                 .format(children[0].trackid, children[0].pdgid, node.pdgid)
                 )
@@ -1252,16 +1270,16 @@ def merging_algo(root, inplace=False, progress=True, **kwargs):
         pbar = tqdm.tqdm(total=maxdepth, desc='merging iterations')
     while True:
         if progress: pbar.update()
-        # ntuputils.logger.info('Merging iteration %s/%s', i, maxdepth)
+        # logger.info('Merging iteration %s/%s', i, maxdepth)
         did_update = False
         for node in list(traverse_only_leafparents(root)):
             if perform_merging_for_node(node, **kwargs):
                 did_update = True
         if not did_update:
-            ntuputils.logger.debug('No update - breaking')
+            logger.debug('No update - breaking')
             break
         # if i > 3: root.print()
-        # print_dist(root, ntuputils.logger.debug)
+        # print_dist(root, logger.debug)
         i += 1
     if progress: pbar.close()
     return root
@@ -1278,7 +1296,7 @@ def savefig(*args, **kwargs):
     args[0] = strftime(args[0])
     directory = osp.dirname(args[0])
     if not osp.isdir(directory):
-        ntuputils.logger.info('Creating %s', directory)
+        logger.info('Creating %s', directory)
         os.makedirs(directory)
     kwargs.setdefault('bbox_inches', 'tight')
     plt.savefig(*args, **kwargs)
